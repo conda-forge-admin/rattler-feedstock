@@ -25,6 +25,22 @@ build:
       - if: unix
         then:
           - export OPENSSL_DIR=$PREFIX
+      - if: ppc64le
+        then:
+          # rust-lld, which rustc uses by default, cannot handle the inline-PLT
+          # relocations gcc emits for ppc64le (R_PPC64_PLT16_HA, R_PPC64_PLTSEQ,
+          # R_PPC64_PLTCALL) in the vendored libsolv objects. gcc honors the last
+          # -fuse-ld, so this falls back to the GNU bfd linker. It has to go into
+          # RUSTFLAGS rather than CARGO_BUILD_RUSTFLAGS: cargo-auditable passes its
+          # own flags via CARGO_ENCODED_RUSTFLAGS, which shadows the config-level
+          # CARGO_BUILD_RUSTFLAGS but preserves RUSTFLAGS.
+          - export RUSTFLAGS="${RUSTFLAGS:-${CARGO_BUILD_RUSTFLAGS:-}} -C link-arg=-fuse-ld=bfd"
+          # aws-lc-sys' cmake build does not assemble aesp8-ppc.S/ghashp8-ppc.S when
+          # cross-compiling, leaving aes_hw_* and gcm_*_p8 undefined. Its cc builder
+          # does compile them, and the jitterentropy problem that made us pick cmake
+          # in the first place does not apply here - that source is not part of the
+          # ppc64le file list.
+          - unset AWS_LC_SYS_CMAKE_BUILDER
       - cd crates/rattler-bin
       - cargo-bundle-licenses --format yaml --output ../../THIRDPARTY.yml
       - cargo auditable install --no-track --locked --features native-tls,s3,gcs --no-default-features --root ${{ PREFIX }} --path .
@@ -33,6 +49,10 @@ build:
           - mkdir -p $PREFIX/etc/pixi/rattler
           - touch $PREFIX/etc/pixi/rattler/global-ignore-conda-prefix
           - mkdir -p $PREFIX/share/zsh/site-functions $PREFIX/share/bash-completion/completions $PREFIX/share/fish/vendor_completions.d
+          # cargo does not pass LDFLAGS to the final link, so the binary carries no
+          # rpath until rattler-build relinks it at packaging time. Running it here
+          # - under qemu when cross-compiling - needs this to find libssl.
+          - export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           - $PREFIX/bin/rattler completion --shell zsh > $PREFIX/share/zsh/site-functions/_rattler
           - $PREFIX/bin/rattler completion --shell bash > $PREFIX/share/bash-completion/completions/rattler
           - $PREFIX/bin/rattler completion --shell fish > $PREFIX/share/fish/vendor_completions.d/rattler.fish
@@ -48,7 +68,8 @@ requirements:
     - cargo-bundle-licenses
     - cargo-auditable
     - cmake
-    - make
+    - if: unix
+      then: make
   host:
     - if: linux
       then:
